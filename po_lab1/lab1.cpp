@@ -5,7 +5,6 @@
 
 using namespace std;
 
-using std::chrono::nanoseconds;
 using std::chrono::microseconds;
 using std::chrono::duration_cast;
 using std::chrono::high_resolution_clock;
@@ -22,21 +21,10 @@ void subtract_rows(const vector<vector<int>>& A, const vector<vector<int>>& B, v
     }
 }
 
-void initialize_rows(vector<vector<int>>& A, vector<vector<int>>& B, int start_row, int num_rows, int cols)
-{
-    for(int i = start_row; i < start_row + num_rows && i < A.size(); i++)
-    {
-        for(int j = 0; j < cols; j++)
-        {
-            A[i][j] = rand() % 100;
-            B[i][j] = rand() % 100;
-        }
-    }
-}
 
 int main() 
 {
-    const int NUM_THREADS = 16;
+    const int NUM_THREADS = 128;
 
      srand(time(nullptr));  
      int n;
@@ -44,43 +32,54 @@ int main()
      cout << "Enter matrix size (n x n): ";
      cin >> n;
 
-     ///
-     auto creation_begin = high_resolution_clock::now();
      vector<vector<int>> A(n, vector<int>(n));
      vector<vector<int>> B(n, vector<int>(n));
      vector<vector<int>> C(n, vector<int>(n));
-     auto creation_end = high_resolution_clock::now();
-     auto creation_time = duration_cast<microseconds>(creation_end - creation_begin);
-    ///
 
-    ///
-     vector<thread> init_threads;
+     for (int i = 0; i < n; i++) 
+     {
+        for (int j = 0; j < n; j++) 
+        {
+            A[i][j] = rand() % 100;
+            B[i][j] = rand() % 100;
+        }
+    }
+
+    for (int i = 0; i < n; i++) 
+    {
+       for (int j = 0; j < n; j++) 
+       {
+           C[i][j] = 0;
+       }
+   }
+
+    cout << "\n----- SEQUENTIAL VERSION -----\n";
+
+    auto seq_begin = high_resolution_clock::now();
+
+    for (int i = 0; i < n; i++) 
+    {
+        for (int j = 0; j < n; j++) 
+        {
+            C[i][j] = A[i][j] - B[i][j];
+        }
+    }
+
+    auto seq_end = high_resolution_clock::now();
+    auto seq_time = duration_cast<microseconds>(seq_end - seq_begin);
+
+    cout << "Sequential Time Measurements\n";
+    cout << "Matrix subtraction time: " << seq_time.count() << " microseconds (" 
+         << seq_time.count() / 1000.0 << " milliseconds)" << endl;
+
+
+    
+    cout << "\n----- PARALLEL VERSION -----\n";
+    
+     vector<thread> calc_threads;
      int rows_per_thread = (n + NUM_THREADS - 1) / NUM_THREADS;
 
-     auto init_begin = high_resolution_clock::now();
-
-     for (int i = 0; i < NUM_THREADS; i++) 
-     {
-        int start_row = i * rows_per_thread;
-        init_threads.push_back(thread(initialize_rows, ref(A), ref(B), start_row, rows_per_thread, n));
-     }
-
-     for(auto& t : init_threads)
-     {
-        if(t.joinable())
-        {
-            t.join();
-        }
-     }
-
-     auto init_end = high_resolution_clock::now();
-     auto init_time = duration_cast<microseconds>(init_end - init_begin); 
-    ///
-
-    ///
-     vector<thread> calc_threads;
-
-     auto calc_begin = high_resolution_clock::now();
+     auto par_begin = high_resolution_clock::now();
 
      for (int i = 0; i < NUM_THREADS; i++) 
      {
@@ -96,45 +95,15 @@ int main()
         }
      }
 
-     auto calc_end = high_resolution_clock::now();
-     auto calc_time = duration_cast<microseconds>(calc_end - calc_begin);
-    ///
+     auto par_end = high_resolution_clock::now();
+     auto par_time = duration_cast<microseconds>(par_end - par_begin);
 
 
-     cout << "Matrix A:\n";
-     for (int i = 0; i < n; i++) {
-         for (int j = 0; j < n; j++) {
-             cout << A[i][j] << "\t";
-         }
-         cout << endl;
-     }
- 
-     cout << "\nMatrix B:\n";
-     for (int i = 0; i < n; i++) {
-         for (int j = 0; j < n; j++) {
-             cout << B[i][j] << "\t";
-         }
-         cout << endl;
-     }
- 
-     cout << "\nMatrix C (A - B):\n";
-     for (int i = 0; i < n; i++) {
-         for (int j = 0; j < n; j++) {
-             cout << C[i][j] << "\t";
-         }
-         cout << endl;
-     }
+     cout << "Number of threads used: " << NUM_THREADS;
+     cout << "\nParallel Time Measurements\n";
+     cout << "Matrix subtraction time: " << par_time.count() << " microseconds (" 
+         << par_time.count() / 1000.0 << " milliseconds)" << endl;
 
-     
-     cout << endl << "Number of threads used: " << NUM_THREADS << endl;
-
-     cout << "\n----- Time Measurements -----\n";
-     cout << "Matrix creation time: " << creation_time.count() << " microseconds" << endl; 
-     cout << "Matrix initialization time: " << init_time.count() << " microseconds" << endl;
-     cout << "Matrix subtraction time: " << calc_time.count() << " microseconds" << endl;
-
-     auto total_time = creation_time + init_time + calc_time;
-     cout << "Total proccesing time: " << total_time.count() << " microseconds (" << total_time.count() / 1000.0 << " milliseconds)" << endl;
-
+    
      return 0;
 }
