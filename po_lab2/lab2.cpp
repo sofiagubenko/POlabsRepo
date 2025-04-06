@@ -13,6 +13,40 @@ using std::chrono::microseconds;
 using std::chrono::duration_cast;
 using std::chrono::high_resolution_clock;
 
+mutex mtx;
+long long ParEvenSum = 0;
+int ParMinEven = -1;
+
+void processArrayPart(const vector<int>& arr, int start, int end) 
+{
+    long long localEvenSum = 0;
+    int localMinEven = -1;
+    
+    for (int i = start; i < end; i++) 
+    {
+        if (arr[i] % 2 == 0) 
+        {
+            localEvenSum += arr[i];
+            if (localMinEven == -1 || arr[i] < localMinEven) 
+            {
+                localMinEven = arr[i];
+            }
+        }
+    }
+
+    lock_guard<mutex> lock(mtx);
+    ParEvenSum += localEvenSum;
+    if (localMinEven != -1) 
+    {
+        if (ParMinEven == -1 || localMinEven < ParMinEven) 
+        {
+            ParMinEven = localMinEven;
+        }
+    }
+}
+
+
+
 int main()
 {
     int size;
@@ -33,6 +67,8 @@ int main()
         arr[i] = rand() % 10000;
     }
     
+    cout << "\n----- SEQUENTIAL VERSION -----\n";
+
     long long evenSum = 0;
     int minEven = -1;
 
@@ -52,16 +88,58 @@ int main()
     auto seq_end = high_resolution_clock::now();
     auto seq_time = duration_cast<microseconds>(seq_end - seq_begin);
 
+    //
     cout << "Sum of even numbers: " << evenSum << endl;
     if (minEven != -1) 
     {
         cout << "Smallest even number: " << minEven << endl;
-    } else 
-    {
-        cout << "No even numbers found." << endl;
-    }
-
+    } 
     cout << "Time taken: " << seq_time.count() << " microseconds" << endl;
+    //
 
+    cout << "\n----- PARALLEL VERSION(blocking primitives) -----\n";
+
+    ParEvenSum = 0;
+    ParMinEven = -1;
+
+    const int numThreads = 4;
+    vector<thread> threads;
+
+    auto parallel_begin = high_resolution_clock::now();
+
+    int chunkSize = size / numThreads;
+    for (int i = 0; i < numThreads; i++)
+    {
+        int start = i * chunkSize;
+        int end;
+        if (i == numThreads - 1) 
+        {
+            end = size;
+        } else 
+        {
+            end = (i + 1) * chunkSize;
+        }
+        threads.push_back(thread(processArrayPart, ref(arr), start, end));
+    }
+    
+    for (auto& t : threads) 
+    {
+        if (t.joinable()) 
+        {
+            t.join();
+        } 
+    }
+    auto parallel_end = high_resolution_clock::now();
+    auto parallel_time = duration_cast<microseconds>(parallel_end - parallel_begin);
+
+    //
+    cout << "Sum of even numbers: " << ParEvenSum << endl;
+    if (ParMinEven != -1) 
+    {
+        cout << "Smallest even number: " << ParMinEven << endl;
+    } 
+    cout << "Time taken: " << parallel_time.count() << " microseconds" << endl;
+    //
+    
     return 0;
 }
