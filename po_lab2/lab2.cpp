@@ -17,6 +17,9 @@ mutex mtx;
 long long ParEvenSum = 0;
 int ParMinEven = -1;
 
+atomic<long long> AtomicEvenSum(0);
+atomic<int> AtomicMinEven;
+
 void processArrayPart(const vector<int>& arr, int start, int end) 
 {
     long long localEvenSum = 0;
@@ -45,7 +48,29 @@ void processArrayPart(const vector<int>& arr, int start, int end)
     }
 }
 
+void processArrayPartAtomic(const vector<int>& arr, int start, int end) 
+{
+    long long localEvenSum = 0;
 
+    for (int i = start; i < end; i++) 
+    {
+        if (arr[i] % 2 == 0) 
+        {
+            localEvenSum += arr[i];
+
+            int currentMin = AtomicMinEven.load();
+            while (currentMin == -1 || arr[i] < currentMin) 
+            {
+                if (AtomicMinEven.compare_exchange_weak(currentMin, arr[i])) 
+                {
+                    break;
+                }
+            }
+        }
+    }
+
+    AtomicEvenSum.fetch_add(localEvenSum);
+}
 
 int main()
 {
@@ -97,17 +122,19 @@ int main()
     cout << "Time taken: " << seq_time.count() << " microseconds" << endl;
     //
 
+
+    const int numThreads = 128;
+    int chunkSize = size / numThreads;
+
     cout << "\n----- PARALLEL VERSION(blocking primitives) -----\n";
 
     ParEvenSum = 0;
     ParMinEven = -1;
 
-    const int numThreads = 4;
     vector<thread> threads;
 
     auto parallel_begin = high_resolution_clock::now();
 
-    int chunkSize = size / numThreads;
     for (int i = 0; i < numThreads; i++)
     {
         int start = i * chunkSize;
@@ -141,5 +168,48 @@ int main()
     cout << "Time taken: " << parallel_time.count() << " microseconds" << endl;
     //
     
+    
+    cout << "\n----- PARALLEL VERSION(atomic CAS) -----\n";
+
+    AtomicEvenSum.store(0);
+    AtomicMinEven.store(-1);
+    vector<thread> atomicThreads;
+
+    auto parallel_atomic_begin = high_resolution_clock::now();
+
+    for (int i = 0; i < numThreads; i++) 
+    {
+        int start = i * chunkSize;
+        int end;
+    
+        if (i == numThreads - 1) 
+        {
+            end = size;
+        } else 
+        {
+            end = (i + 1) * chunkSize;
+        }
+
+        atomicThreads.push_back(thread(processArrayPartAtomic, ref(arr), start, end));
+    }    
+
+    for (auto& t : atomicThreads) 
+    {
+        if (t.joinable()) 
+        {
+            t.join();
+        }
+    }
+
+    auto parallel_atomic_end = high_resolution_clock::now();
+    auto parallel_atomic_time = duration_cast<microseconds>(parallel_atomic_end - parallel_atomic_begin);
+    
+    cout << "Sum of even numbers: " << AtomicEvenSum.load() << endl;
+    if (AtomicMinEven.load() != -1)
+    {
+        cout << "Smallest even number: " << AtomicMinEven.load() << endl;
+    }
+    cout << "Time taken: " << parallel_atomic_time.count() << " microseconds" << endl;
+
     return 0;
 }
