@@ -7,6 +7,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <random>
+#include <algorithm>
+
 
 using namespace std;
 mutex cout_mutex;
@@ -16,6 +18,17 @@ class Task
     public:
         Task(int id, int duration) : id(id), duration(duration) {}
         Task() : id(0), duration(0) {} 
+
+        void markEnqueued() 
+        {
+            enqueueTime = chrono::steady_clock::now();
+        }
+        
+        long long getWaitTime() const 
+        {
+            auto now = chrono::steady_clock::now();
+            return chrono::duration_cast<chrono::milliseconds>(now - enqueueTime).count();
+        }
         
         void execute() const 
         {
@@ -35,6 +48,7 @@ class Task
     private:
         int id;
         int duration;
+        chrono::steady_clock::time_point enqueueTime;
 };
 
 
@@ -61,13 +75,21 @@ public:
             queue.pop();
     }
     
-    bool push(const Task& task) 
+    bool push(Task task) 
     {
         unique_lock<mutex> lock(mtx);
         if (queue.size() >= 10) 
             return false; 
-
+            
+        task.markEnqueued();
         queue.push(task); 
+
+        if (queue.size() == 10 && !full_flag) 
+        {
+            full_time_start = chrono::steady_clock::now();
+            full_flag = true;
+        }
+
         cv.notify_one();  
         return true;  
     }
@@ -82,6 +104,14 @@ public:
         
         task = queue.front();
         queue.pop();
+
+        if (queue.size() < 10 && full_flag) 
+        {
+            auto full_time_end = chrono::steady_clock::now();
+            full_durations.push_back(chrono::duration_cast<chrono::milliseconds>(full_time_end - full_time_start).count());
+            full_flag = false;
+        }
+
         return true;
     }
     
@@ -97,11 +127,21 @@ public:
         cv.notify_all();
     }
 
+    vector<long long> get_full_times() const 
+    {
+        return full_durations;
+    }
+
+
 private:
     queue<Task> queue;
     mutable mutex mtx;
     condition_variable cv;
     bool terminated = false;
+
+    chrono::steady_clock::time_point full_time_start;
+    bool full_flag = false;
+    vector<long long> full_durations;
 };
 
 class ThreadPool 
@@ -175,6 +215,10 @@ class ThreadPool
         void pause() 
         {
             paused = true;
+
+            for (auto& q : queues)
+                q->notify();
+
             lock_guard<mutex> lock(cout_mutex);
             cout << "ThreadPool paused.\n";
         }
@@ -199,6 +243,18 @@ class ThreadPool
         {
             return rejectedTasks;
         }
+
+        double getAverageWaitTime() const 
+        {
+            if (tasks_executed == 0) 
+                return 0;
+            return static_cast<double>(total_wait_time.load()) / tasks_executed;
+        }
+    
+        TaskQueue* getQueue(int index) const 
+        {
+            return queues[index];
+        }
         
     private:
         void workerRoutine(TaskQueue* queue) 
@@ -216,7 +272,9 @@ class ThreadPool
                 
                 if (!got_task) 
                     break;
-                
+                    
+                total_wait_time += task.getWaitTime();
+                tasks_executed++;
                 task.execute();
             }
         }
@@ -228,15 +286,12 @@ class ThreadPool
         atomic<bool> paused{false};
         atomic<bool> force_stop{false};
         atomic<int> rejectedTasks{0};
+        atomic<long long> total_wait_time{0};
+        atomic<int> tasks_executed{0};
 };
     
 
-int random_duration(int min_sec = 4, int max_sec = 10) 
-{
-    return min_sec + rand() % (max_sec - min_sec + 1);
-}
-
-void generateTasks(ThreadPool& pool, atomic<int>& global_task_id, int thread_id) 
+void generateTasks(ThreadPool& pool, atomic<int>& global_task_id) 
 {
     for (int i = 0; i < 6; ++i) 
     {
@@ -257,25 +312,40 @@ int main()
     pool.start();
     atomic<int> global_task_id{1};
     
-    thread t1(generateTasks, ref(pool), ref(global_task_id), 1);
-    thread t2(generateTasks, ref(pool), ref(global_task_id), 2);
-    thread t3(generateTasks, ref(pool), ref(global_task_id), 3);
+    thread generator(generateTasks, ref(pool), ref(global_task_id));
+
     
     this_thread::sleep_for(chrono::seconds(3));
     pool.pause();
     this_thread::sleep_for(chrono::seconds(5));
     pool.resume();
 
-    t1.join();
-    t2.join();
-    t3.join();
+    generator.join();
     
     this_thread::sleep_for(chrono::seconds(20));
     
     pool.shutdown(false);
-    
-    cout << "All tasks processed or rejected" << endl;
+
+    cout << "\n========== STATS ==========\n";
     cout << "Rejected tasks: " << pool.getRejectedTaskCount() << endl;
+    cout << "Average task wait time (ms): " << pool.getAverageWaitTime() << endl;
+    
+    vector<long long> all_full;
+    for (int i = 0; i < 2; ++i) 
+    {
+        vector<long long> times = pool.getQueue(i)->get_full_times();
+        all_full.insert(all_full.end(), times.begin(), times.end());
+    }
+
+    if (!all_full.empty()) 
+    {
+        auto [min_it, max_it] = minmax_element(all_full.begin(), all_full.end());
+        cout << "Max full queue time (ms): " << *max_it << endl;
+        cout << "Min full queue time (ms): " << *min_it << endl;
+    } else 
+    {
+        cout << "Queue was never fully filled.\n";
+    }
 
 
     return 0;
