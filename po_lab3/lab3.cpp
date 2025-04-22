@@ -94,12 +94,12 @@ public:
         return true;  
     }
     
-    bool pop(Task& task, atomic<bool>& paused, atomic<bool>& force_stop) 
+    bool pop(Task& task, atomic<bool>& force_stop) 
     {
         unique_lock<mutex> lock(mtx);
         cv.wait(lock, [this]() { return !queue.empty() || terminated; });
 
-        if (terminated || force_stop)
+        if (terminated && (terminated || force_stop))
             return false;
         
         task = queue.front();
@@ -244,12 +244,25 @@ class ThreadPool
             return rejectedTasks;
         }
 
+        int getTasksExecuted() const 
+        {
+            return tasks_executed.load();
+        }
+        
         double getAverageWaitTime() const 
         {
             if (tasks_executed == 0) 
                 return 0;
             return static_cast<double>(total_wait_time.load()) / tasks_executed;
         }
+
+        double getAverageIdleTime() const 
+        {
+            if (idle_count == 0) 
+                return 0;
+            return static_cast<double>(total_worker_idle_time.load()) / idle_count;
+        }
+        
     
         TaskQueue* getQueue(int index) const 
         {
@@ -268,7 +281,14 @@ class ThreadPool
                 }
 
                 Task task;
-                bool got_task = queue->pop(task, paused, force_stop);
+
+                auto wait_start = chrono::steady_clock::now();
+                bool got_task = queue->pop(task, force_stop);
+                auto wait_end = chrono::steady_clock::now();
+
+                long long idle_time = chrono::duration_cast<chrono::milliseconds>(wait_end - wait_start).count();
+                total_worker_idle_time += idle_time;
+                idle_count++;
                 
                 if (!got_task) 
                     break;
@@ -288,14 +308,19 @@ class ThreadPool
         atomic<int> rejectedTasks{0};
         atomic<long long> total_wait_time{0};
         atomic<int> tasks_executed{0};
+        atomic<long long> total_worker_idle_time{0};  
+        atomic<int> idle_count{0};    
 };
     
 
-void generateTasks(ThreadPool& pool, atomic<int>& global_task_id) 
+void generateTasks(ThreadPool& pool, atomic<int>& global_task_id, int task_limit) 
 {
-    for (int i = 0; i < 6; ++i) 
+    while(true)
     {
-        int task_id = global_task_id++;
+        int task_id = global_task_id.fetch_add(1);
+        if (task_id > task_limit)
+            break;
+
         int duration = 4 + rand() % 7; 
         Task task(task_id, duration);
         pool.addTask(task);
@@ -311,16 +336,23 @@ int main()
     ThreadPool pool;
     pool.start();
     atomic<int> global_task_id{1};
-    
-    thread generator(generateTasks, ref(pool), ref(global_task_id));
 
-    
-    this_thread::sleep_for(chrono::seconds(3));
-    pool.pause();
-    this_thread::sleep_for(chrono::seconds(5));
-    pool.resume();
+    int task_limit = 50;        
+    int num_generators = 2; 
 
-    generator.join();
+    vector<thread> generators;
+    for (int i = 0; i < num_generators; ++i)
+    {
+        generators.emplace_back(generateTasks, ref(pool), ref(global_task_id), task_limit);
+    }
+    
+   // this_thread::sleep_for(chrono::seconds(3));
+   // pool.pause();
+   // this_thread::sleep_for(chrono::seconds(5));
+   // pool.resume();
+
+    for (auto& t : generators)
+        t.join();
     
     this_thread::sleep_for(chrono::seconds(20));
     
@@ -328,6 +360,7 @@ int main()
 
     cout << "\n========== STATS ==========\n";
     cout << "Rejected tasks: " << pool.getRejectedTaskCount() << endl;
+    cout << "Total executed tasks: " << pool.getTasksExecuted() << endl;
     cout << "Average task wait time (ms): " << pool.getAverageWaitTime() << endl;
     
     vector<long long> all_full;
@@ -347,6 +380,7 @@ int main()
         cout << "Queue was never fully filled.\n";
     }
 
+    cout << "Average worker idle time (ms): " << pool.getAverageIdleTime() << endl;
 
     return 0;
 }
