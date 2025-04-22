@@ -94,12 +94,15 @@ public:
         return true;  
     }
     
-    bool pop(Task& task, atomic<bool>& force_stop) 
+    bool pop(Task& task, atomic<bool>& force_stop, const atomic<bool>& paused) 
     {
         unique_lock<mutex> lock(mtx);
-        cv.wait(lock, [this]() { return !queue.empty() || terminated; });
+        cv.wait(lock, [this, &force_stop, &paused]() 
+        { 
+            return (!queue.empty() && !paused) || terminated || force_stop; 
+        });
 
-        if (terminated && (terminated || force_stop))
+        if (queue.empty() && (terminated || force_stop))
             return false;
         
         task = queue.front();
@@ -216,9 +219,6 @@ class ThreadPool
         {
             paused = true;
 
-            for (auto& q : queues)
-                q->notify();
-
             lock_guard<mutex> lock(cout_mutex);
             cout << "ThreadPool paused.\n";
         }
@@ -226,9 +226,10 @@ class ThreadPool
         void resume() 
         {
             paused = false;
+
             for (auto& q : queues)
                 q->notify();
-    
+                
             lock_guard<mutex> lock(cout_mutex);
             cout << "ThreadPool resumed.\n";
         }
@@ -272,13 +273,19 @@ class ThreadPool
     private:
         void workerRoutine(TaskQueue* queue) 
         {
+            
             while (!terminated) 
-            {         
-                if (paused) 
+            {     
                 {
-                    this_thread::sleep_for(chrono::milliseconds(100));
-                    continue;
+                    unique_lock<mutex> pause_lock(pause_mutex);    
+                    if (paused) 
+                    {
+                        pause_cv.wait(pause_lock, [this]() { return !paused || terminated; });
+                    }
                 }
+
+                if (terminated) 
+                    break;
 
                 Task task;
 
@@ -310,6 +317,8 @@ class ThreadPool
         atomic<int> tasks_executed{0};
         atomic<long long> total_worker_idle_time{0};  
         atomic<int> idle_count{0};    
+        condition_variable pause_cv;
+        mutex pause_mutex;
 };
     
 
@@ -346,10 +355,10 @@ int main()
         generators.emplace_back(generateTasks, ref(pool), ref(global_task_id), task_limit);
     }
     
-   // this_thread::sleep_for(chrono::seconds(3));
-   // pool.pause();
-   // this_thread::sleep_for(chrono::seconds(5));
-   // pool.resume();
+    this_thread::sleep_for(chrono::seconds(3));
+    pool.pause();
+    this_thread::sleep_for(chrono::seconds(5));
+    pool.resume();
 
     for (auto& t : generators)
         t.join();
