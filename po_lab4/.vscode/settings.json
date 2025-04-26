@@ -1,6 +1,11 @@
 {
     "files.associations": {
         "vector": "cpp",
-        "iostream": "cpp"
+        "iostream": "cpp",
+        "xtree": "cpp",
+        "mutex": "cpp",
+        "iosfwd": "cpp",
+        "atomic": "cpp",
+        "xstring": "cpp"
     }
 }

@@ -1,8 +1,9 @@
 #include <iostream>
 #include <winsock2.h>
 #include <vector>
-#include <ctime>
 #include <thread>
+#include <chrono>
+#include <atomic>
 
 using namespace std;
 
@@ -10,17 +11,8 @@ struct MatrixHeader
 {
     uint32_t n;
     uint32_t threads;
-    uint32_t type;
+    uint32_t len;
 };
-
-vector<vector<int>> generate_matrix(int n) 
-{
-    vector<vector<int>> matrix(n, vector<int>(n));
-    for (int i = 0; i < n; i++)
-        for (int j = 0; j < n; j++)
-            matrix[i][j] = rand() % 100;
-    return matrix;
-}
 
 vector<int> flatten(const vector<vector<int>>& mat) 
 {
@@ -32,21 +24,16 @@ vector<int> flatten(const vector<vector<int>>& mat)
     return flat;
 }
 
-vector<vector<int>> unflatten(const vector<int>& flat, int n) 
-{
-    vector<vector<int>> mat(n, vector<int>(n));
-    for (int i = 0; i < n; i++)
-        for (int j = 0; j < n; j++)
-            mat[i][j] = flat[i * n + j];
-    return mat;
-}
-
 bool send_all(SOCKET s, const char* buf, int len) 
 {
     int total = 0;
     while (total < len) 
-        total += send(s, buf + total, len - total, 0);
-    
+    {
+        int bytes = send(s, buf + total, len - total, 0);
+        if (bytes <= 0) 
+            return false;
+        total += bytes;
+    }
     return true;
 }
 
@@ -54,78 +41,137 @@ bool recv_all(SOCKET s, char* buf, int len)
 {
     int total = 0;
     while (total < len) 
-        total += recv(s, buf + total, len - total, 0);
-    
+    {
+        int bytes = recv(s, buf + total, len - total, 0);
+        if (bytes <= 0) 
+            return false; 
+        total += bytes;
+    }
     return true;
 }
 
-bool send_matrix(SOCKET sock, const vector<int>& flat, int n, int threads, int type) 
+bool send_command(SOCKET sock, const string& cmd)
 {
-    MatrixHeader header = { htonl(n), htonl(threads), htonl(type) };
-    send_all(sock, (char*)&header, sizeof(header));
-
-    vector<int> net_flat = flat;
-    for (int i = 0; i < n * n; i++) 
-        net_flat[i] = htonl(net_flat[i]);
-
-    send_all(sock, (char*)net_flat.data(), n * n * sizeof(int));
+    uint32_t len = htonl(cmd.size());
+    if (!send_all(sock, (char*)&len, sizeof(len)))
+        return false;
+    if (!send_all(sock, cmd.data(), cmd.size()))
+        return false;
     return true;
 }
 
-void print_matrix(const vector<vector<int>>& mat) 
+bool recv_command(SOCKET sock, string& cmd)
 {
-    int n = mat.size();
-    for (int i = 0; i < n; i++, cout << "\n")
-        for (int j = 0; j < n; j++)
-            cout << mat[i][j] << "\t";
+    uint32_t len = 0;
+    if (!recv_all(sock, (char*)&len, sizeof(len)))
+        return false;
+    len = ntohl(len);
+
+    vector<char> buf(len);
+    if (!recv_all(sock, buf.data(), len))
+        return false;
+
+    cmd.assign(buf.begin(), buf.end());
+    return true;
 }
 
-int main() {
-    srand((unsigned)time(0));
 
+void clientThread() 
+{
     WSADATA w;
     WSAStartup(MAKEWORD(2, 2), &w);
-    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
 
+    SOCKET sock = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in serv = {};
     serv.sin_family = AF_INET;
     serv.sin_port = htons(12345);
     serv.sin_addr.s_addr = inet_addr("127.0.0.1");
 
     connect(sock, (sockaddr*)&serv, sizeof(serv));
+    send_command(sock, "CONNECT");
+    char buffer[4096];
+    string server_response;
+    recv_command(sock, server_response);
+    cout << "[SERVER] " << server_response << endl;
 
-    int n, threads;
+    int n;
     cout << "Enter matrix size n: ";
     cin >> n;
-    cout << "Enter number of threads: ";
-    cin >> threads;
 
-    vector<vector<int>> A = generate_matrix(n);
-    vector<vector<int>> B = generate_matrix(n);
+    vector<vector<int>> A(n, vector<int>(n));
+    vector<vector<int>> B(n, vector<int>(n));
 
-    vector<int> A_flat = flatten(A);
-    vector<int> B_flat = flatten(B);
+    for (int i = 0; i < n; i++)
+        for (int j = 0; j < n; j++) 
+        {
+            A[i][j] = rand() % 100;
+            B[i][j] = rand() % 100;
+        }
 
-    cout << "Matrix A (generated):\n";
-    print_matrix(A);
+    vector<int> thread_config = { 1, 2, 4, 8, 16, 32, 64, 128 };
 
-    cout << "Matrix B (generated):\n";
-    print_matrix(B);
+    send_command(sock, "SEND_DATA");
 
-    send_matrix(sock, A_flat, n, threads, 0);
-    send_matrix(sock, B_flat, n, threads, 1);
+    MatrixHeader header;
+    header.n = htonl(n);
+    header.threads = htonl(thread_config.size());
+    header.len = htonl(n * n * sizeof(int));
 
-    vector<int> C_flat(n * n);
-    recv_all(sock, (char*)C_flat.data(), n * n * sizeof(int));
+    send_all(sock, (char*)&header, sizeof(header));
+
+    for (int i = 0; i < thread_config.size(); i++)
+        thread_config[i] = htonl(thread_config[i]);
+    send_all(sock, (char*)thread_config.data(), thread_config.size() * sizeof(int));
+
+    vector<int> flatA = flatten(A);
+    vector<int> flatB = flatten(B);
+
     for (int i = 0; i < n * n; i++) 
-        C_flat[i] = ntohl(C_flat[i]);
+    {
+        flatA[i] = htonl(flatA[i]);
+        flatB[i] = htonl(flatB[i]);
+    }
 
-    vector<vector<int>> C = unflatten(C_flat, n);
+    send_all(sock, (char*)flatA.data(), n * n * sizeof(int));
+    send_all(sock, (char*)flatB.data(), n * n * sizeof(int));
 
-    cout << "Matrix C = A - B (from server):\n";
-    print_matrix(C);
+    recv_command(sock, server_response);
+    cout << "[SERVER] " << server_response << endl;
 
+    send_command(sock, "START_SUBTRACTING");
+    
+    atomic<bool> is_done(false);
+
+    thread listener([&]() 
+    {
+        char buf[4096];
+        while (!is_done) 
+        {
+            string msg;
+            if (!recv_command(sock, msg))
+                break;
+            cout << "[SERVER] " << msg << endl;
+            if (msg.find("SUBTRACTING_COMPLETE") != string::npos)
+                is_done = true;
+        }
+    });
+
+    while (!is_done) 
+        this_thread::sleep_for(chrono::milliseconds(500));
+
+    send_command(sock, "GET_RESULT");
+    recv_command(sock, server_response);
+    cout << "[SERVER] Final results:\n" << server_response << endl;
+
+
+    listener.join();
     closesocket(sock);
     WSACleanup();
+}
+
+int main() 
+{
+    srand((unsigned)time(nullptr));
+    thread(clientThread).join();
     return 0;
 }
